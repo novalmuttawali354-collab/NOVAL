@@ -1,4 +1,4 @@
-name: Build PK Mobile Expander APK V2
+name: Build PK Converter Fixed APK
 
 on:
   workflow_dispatch:
@@ -18,20 +18,78 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - name: Rebuild project archive
         run: |
           cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
           unzip -t project.zip
           unzip -q project.zip
+
+      - name: Patch app to converter-only + valid Expand JSON
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('PKMobileExpanderV3')
+
+          # 1) ExportedAt MUST be ISO-8601 string for Expand, not unix milliseconds.
+          p = root/'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
+          s = p.read_text(encoding='utf-8')
+          old = '        root.put("exportedAt", System.currentTimeMillis());'
+          new = '''        java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);\n        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));\n        root.put("exportedAt", iso.format(new java.util.Date()));'''
+          if old not in s:
+              raise SystemExit('exportedAt line not found')
+          s = s.replace(old, new)
+          p.write_text(s, encoding='utf-8')
+
+          # 2) Separate package id so it can install alongside old V3.
+          p = root/'app/build.gradle.kts'
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverter"')
+          s = s.replace('versionCode = 3', 'versionCode = 4')
+          s = s.replace('versionName = "3.0"', 'versionName = "4.0"')
+          p.write_text(s, encoding='utf-8')
+
+          # 3) Remove accessibility service from manifest. Converter only reads .4pk and creates JSON.
+          p = root/'app/src/main/AndroidManifest.xml'
+          s = p.read_text(encoding='utf-8')
+          s = re.sub(r'\n\s*<service[\s\S]*?</service>\n', '\n', s, count=1)
+          p.write_text(s, encoding='utf-8')
+
+          # 4) Update app name.
+          p = root/'app/src/main/res/values/strings.xml'
+          s = p.read_text(encoding='utf-8')
+          s = re.sub(r'<string name="app_name">.*?</string>', '<string name="app_name">PK Converter for Expand</string>', s)
+          p.write_text(s, encoding='utf-8')
+
+          # 5) Make UI clearly converter-only and hide accessibility controls.
+          p = root/'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('PK Mobile Expander V3', 'PK Converter for Expand')
+          s = s.replace('Versi kosong/universal. Pilih file .4pk milik siapa pun, aplikasi membaca shortcut milik file tersebut lalu bisa langsung dipakai atau disimpan menjadi JSON.',
+                        'Pilih file .4pk milik siapa pun, lalu simpan hasilnya menjadi JSON yang kompatibel dengan Expand. Aplikasi ini tidak membutuhkan Aksesibilitas.')
+          s = s.replace('root.addView(accessBtn);', 'accessBtn.setVisibility(View.GONE);')
+          s = s.replace('root.addView(enabledSwitch);', 'enabledSwitch.setVisibility(View.GONE);')
+          s = s.replace('root.addView(spaceSwitch);', 'spaceSwitch.setVisibility(View.GONE);')
+          s = s.replace('6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.',
+                        '6. Buka Expand → Import snippets → pilih JSON hasil converter. Aksesibilitas cukup aktif untuk Expand saja.')
+          s = s.replace('File ini bisa dibagikan atau di-import ke Expand/PK Mobile.',
+                        'File ini siap di-import ke Expand melalui Settings → Import / Export → Import snippets.')
+          p.write_text(s, encoding='utf-8')
+          PY
+
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - name: Build APK
         working-directory: PKMobileExpanderV3
         run: gradle :app:assembleDebug
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PK-Mobile-Expander-V3-Universal-APK
+          name: PK-Converter-Expand-Fixed-APK
           path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
