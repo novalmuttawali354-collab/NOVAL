@@ -24,7 +24,7 @@ jobs:
           cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
           unzip -q project.zip
 
-      - name: Convert V3 into safe converter V4
+      - name: Make converter-only V4 and fix Expand JSON
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -32,49 +32,71 @@ jobs:
 
           root = Path('PKMobileExpanderV3')
 
-          # 1) JSON Expand: exportedAt MUST be ISO-8601 string, not epoch number.
-          p = root/'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
+          # Fix exportedAt: Expand expects an ISO-8601 STRING, not epoch number.
+          p = root / 'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
           s = p.read_text()
-          s = s.replace(
-              'root.put("exportedAt", System.currentTimeMillis());',
-              'java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd\\\'T\\\'HH:mm:ss.SSS\\\'Z\\\'", java.util.Locale.US);\\n        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));\\n        root.put("exportedAt", iso.format(new java.util.Date()));'
-          )
+          replacement = """java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+                  iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                  root.put("exportedAt", iso.format(new java.util.Date()));"""
+          s = s.replace('root.put("exportedAt", System.currentTimeMillis());', replacement)
           p.write_text(s)
 
-          # 2) Remove Accessibility service completely. App becomes converter-only.
-          p = root/'app/src/main/AndroidManifest.xml'
+          # Remove Accessibility service from the manifest: this app is converter-only.
+          p = root / 'app/src/main/AndroidManifest.xml'
           s = p.read_text()
-          s = re.sub(r'\\n\\s*<service[\\s\\S]*?</service>\\s*', '\\n', s, count=1)
+          s = re.sub(r'\n\s*<service[\s\S]*?</service>\s*', '\n', s, count=1)
           p.write_text(s)
 
-          # 3) New package id so it installs separately from old V3.
-          p = root/'app/build.gradle.kts'
+          # Install separately from old V3 and show a clearer name.
+          p = root / 'app/build.gradle.kts'
           s = p.read_text()
           s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverter"')
           s = s.replace('versionCode = 3', 'versionCode = 4')
           s = s.replace('versionName = "3.0"', 'versionName = "4.0"')
           p.write_text(s)
 
-          # 4) Rename app.
-          p = root/'app/src/main/res/values/strings.xml'
-          s = p.read_text().replace('PK Mobile Expander V3', 'PK Converter V4')
-          p.write_text(s)
+          p = root / 'app/src/main/res/values/strings.xml'
+          p.write_text(p.read_text().replace('PK Mobile Expander V3', 'PK Converter V4'))
 
-          # 5) Make UI clearly converter-only and hide Accessibility controls.
-          p = root/'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
+          # Hide old Accessibility controls and make the instructions converter-only.
+          p = root / 'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
           s = p.read_text()
+          nl = chr(10)
           s = s.replace('PK Mobile Expander V3', 'PK Converter V4')
           s = s.replace(
               'Versi kosong/universal. Pilih file .4pk milik siapa pun, aplikasi membaca shortcut milik file tersebut lalu bisa langsung dipakai atau disimpan menjadi JSON.',
-              'Converter .4pk → JSON khusus untuk Expand. Tidak memakai Aksesibilitas dan tidak menjalankan shortcut sendiri.'
+              'Converter .4pk ke JSON khusus untuk Expand. Tidak memakai Aksesibilitas dan tidak menjalankan shortcut sendiri.'
           )
-          s = s.replace('Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");', 'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");\\n        accessBtn.setVisibility(View.GONE);')
-          s = s.replace('enabledSwitch.setText("Aktifkan text expander");', 'enabledSwitch.setText("Aktifkan text expander");\\n        enabledSwitch.setVisibility(View.GONE);')
-          s = s.replace('spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");', 'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");\\n        spaceSwitch.setVisibility(View.GONE);')
-          s = s.replace('6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.', '6. Buka Expand → Settings → Import / Export → Import snippets, lalu pilih JSON tadi.')
-          s = s.replace('Semua proses ekstrak dilakukan lokal di HP. File .4pk tidak dikirim ke server.', 'Semua proses ekstrak dilakukan lokal di HP. PK Converter tidak meminta izin Aksesibilitas.')
-          # Status card should no longer mention Accessibility.
-          s = s.replace('boolean service = isAccessibilityServiceEnabled();\\n        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");\\n        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));', 'statusText.setText("Mode: CONVERTER ONLY ✓");\\n        statusText.setTextColor(Color.rgb(25, 120, 70));')
+          s = s.replace(
+              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");',
+              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");' + nl + '        accessBtn.setVisibility(View.GONE);'
+          )
+          s = s.replace(
+              'enabledSwitch.setText("Aktifkan text expander");',
+              'enabledSwitch.setText("Aktifkan text expander");' + nl + '        enabledSwitch.setVisibility(View.GONE);'
+          )
+          s = s.replace(
+              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");',
+              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");' + nl + '        spaceSwitch.setVisibility(View.GONE);'
+          )
+          s = s.replace(
+              '6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.',
+              '6. Buka Expand → Settings → Import / Export → Import snippets, lalu pilih JSON tadi.'
+          )
+          s = s.replace(
+              'Semua proses ekstrak dilakukan lokal di HP. File .4pk tidak dikirim ke server.',
+              'Semua proses ekstrak dilakukan lokal di HP. PK Converter tidak meminta izin Aksesibilitas.'
+          )
+          old_status = nl.join([
+              '        boolean service = isAccessibilityServiceEnabled();',
+              '        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");',
+              '        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));'
+          ])
+          new_status = nl.join([
+              '        statusText.setText("Mode: CONVERTER ONLY ✓");',
+              '        statusText.setTextColor(Color.rgb(25, 120, 70));'
+          ])
+          s = s.replace(old_status, new_status)
           p.write_text(s)
           PY
 
