@@ -1,0 +1,94 @@
+name: Build PK Converter V4 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+
+      - name: Convert V3 into safe converter V4
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('PKMobileExpanderV3')
+
+          # 1) JSON Expand: exportedAt MUST be ISO-8601 string, not epoch number.
+          p = root/'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
+          s = p.read_text()
+          s = s.replace(
+              'root.put("exportedAt", System.currentTimeMillis());',
+              'java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd\\\'T\\\'HH:mm:ss.SSS\\\'Z\\\'", java.util.Locale.US);\\n        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));\\n        root.put("exportedAt", iso.format(new java.util.Date()));'
+          )
+          p.write_text(s)
+
+          # 2) Remove Accessibility service completely. App becomes converter-only.
+          p = root/'app/src/main/AndroidManifest.xml'
+          s = p.read_text()
+          s = re.sub(r'\\n\\s*<service[\\s\\S]*?</service>\\s*', '\\n', s, count=1)
+          p.write_text(s)
+
+          # 3) New package id so it installs separately from old V3.
+          p = root/'app/build.gradle.kts'
+          s = p.read_text()
+          s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverter"')
+          s = s.replace('versionCode = 3', 'versionCode = 4')
+          s = s.replace('versionName = "3.0"', 'versionName = "4.0"')
+          p.write_text(s)
+
+          # 4) Rename app.
+          p = root/'app/src/main/res/values/strings.xml'
+          s = p.read_text().replace('PK Mobile Expander V3', 'PK Converter V4')
+          p.write_text(s)
+
+          # 5) Make UI clearly converter-only and hide Accessibility controls.
+          p = root/'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
+          s = p.read_text()
+          s = s.replace('PK Mobile Expander V3', 'PK Converter V4')
+          s = s.replace(
+              'Versi kosong/universal. Pilih file .4pk milik siapa pun, aplikasi membaca shortcut milik file tersebut lalu bisa langsung dipakai atau disimpan menjadi JSON.',
+              'Converter .4pk → JSON khusus untuk Expand. Tidak memakai Aksesibilitas dan tidak menjalankan shortcut sendiri.'
+          )
+          s = s.replace('Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");', 'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");\\n        accessBtn.setVisibility(View.GONE);')
+          s = s.replace('enabledSwitch.setText("Aktifkan text expander");', 'enabledSwitch.setText("Aktifkan text expander");\\n        enabledSwitch.setVisibility(View.GONE);')
+          s = s.replace('spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");', 'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");\\n        spaceSwitch.setVisibility(View.GONE);')
+          s = s.replace('6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.', '6. Buka Expand → Settings → Import / Export → Import snippets, lalu pilih JSON tadi.')
+          s = s.replace('Semua proses ekstrak dilakukan lokal di HP. File .4pk tidak dikirim ke server.', 'Semua proses ekstrak dilakukan lokal di HP. PK Converter tidak meminta izin Aksesibilitas.')
+          # Status card should no longer mention Accessibility.
+          s = s.replace('boolean service = isAccessibilityServiceEnabled();\\n        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");\\n        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));', 'statusText.setText("Mode: CONVERTER ONLY ✓");\\n        statusText.setTextColor(Color.rgb(25, 120, 70));')
+          p.write_text(s)
+          PY
+
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK
+        working-directory: PKMobileExpanderV3
+        run: gradle :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Converter-V4-APK
+          path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
