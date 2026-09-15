@@ -34,111 +34,107 @@ jobs:
 
           root = Path('PKMobileExpanderV3')
 
-          p = root / 'app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java'
-          s = p.read_text()
-          s = s.replace(
-              '            String replacement = cleanupContent(lines[s + 49]);\n            if (replacement.isEmpty()) continue;',
-              '            String rawContent = safe(lines, s + 49);\n            if (isUnsupportedAutomation(rawContent)) continue;\n            String replacement = cleanupContent(rawContent);\n            if (replacement.isEmpty()) continue;'
-          )
-
-          old_cleanup = '''    private static String cleanupContent(String s) {
-              if (s == null) return "";
-              String x = s.replace("<ent__>", "\\n");
-              // Trim hanya newline/spasi di ujung; isi di tengah tidak diubah.
-              int a = 0, b = x.length();
-              while (a < b && Character.isWhitespace(x.charAt(a))) a++;
-              while (b > a && Character.isWhitespace(x.charAt(b - 1))) b--;
-              return x.substring(a, b);
-          }'''
-
-          new_cleanup = r'''    private static boolean isUnsupportedAutomation(String s) {
-              if (s == null) return false;
-              String x = s.toLowerCase(Locale.ROOT);
-              return x.contains("<#>") || x.contains("<wx>") ||
-                      x.matches("(?s).*</?(left|right|delete|backspace|home|end|pageup|pagedown)(?:>|\\b).*?");
-          }
-
-          private static String cleanupContent(String s) {
-              if (s == null) return "";
-              String x = s.replace("<ent__>", "\n");
-
-              if (x.regionMatches(true, 0, "text#macro:", 0, "text#macro:".length())) {
-                  x = x.substring("text#macro:".length());
-              }
-
-              String lower = x.toLowerCase(Locale.ROOT);
-              if (lower.contains("<html") || lower.contains("<body") || lower.contains("<div") || lower.contains("<p>")) {
-                  int body = lower.indexOf("<body");
-                  if (body >= 0) {
-                      int gt = x.indexOf('>', body);
-                      if (gt >= 0) x = x.substring(gt + 1);
-                      lower = x.toLowerCase(Locale.ROOT);
-                      int bodyEnd = lower.lastIndexOf("</body>");
-                      if (bodyEnd >= 0) x = x.substring(0, bodyEnd);
-                  }
-
-                  x = x.replaceAll("(?i)<br\\s*/?>", "\n");
-                  x = x.replaceAll("(?i)</?(p|div|li|tr|h[1-6])\\b[^>]*>", "\n");
-                  x = x.replaceAll("(?s)<[^>]+>", "");
-                  x = decodeHtmlEntities(x);
-              }
-
-              x = x.replace('\u00A0', ' ')
-                   .replace("\r\n", "\n")
-                   .replace('\r', '\n');
-              x = x.replaceAll("[ \\t]+\n", "\n");
-              x = x.replaceAll("\n[ \\t]+", "\n");
-              x = x.replaceAll("\n{3,}", "\n\n");
-
-              int a = 0, b = x.length();
-              while (a < b && Character.isWhitespace(x.charAt(a))) a++;
-              while (b > a && Character.isWhitespace(x.charAt(b - 1))) b--;
-              return x.substring(a, b);
-          }
-
-          private static String decodeHtmlEntities(String s) {
-              String x = s.replace("&nbsp;", " ")
-                      .replace("&amp;", "&")
-                      .replace("&lt;", "<")
-                      .replace("&gt;", ">")
-                      .replace("&quot;", "\\\"")
-                      .replace("&#39;", "'")
-                      .replace("&apos;", "'");
-              java.util.regex.Matcher m = java.util.regex.Pattern.compile("&#(x?[0-9A-Fa-f]+);").matcher(x);
-              StringBuffer sb = new StringBuffer();
-              while (m.find()) {
-                  try {
-                      String n = m.group(1);
-                      int cp = (n.startsWith("x") || n.startsWith("X"))
-                              ? Integer.parseInt(n.substring(1), 16)
-                              : Integer.parseInt(n, 10);
-                      m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(new String(Character.toChars(cp))));
-                  } catch (Exception ex) {
-                      m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(m.group(0)));
-                  }
-              }
-              m.appendTail(sb);
-              return sb.toString();
-          }'''
-
-          if old_cleanup not in s:
-              raise SystemExit('cleanupContent source not found')
-          s = s.replace(old_cleanup, new_cleanup)
-          p.write_text(s)
-
+          # Clean Perfect Keyboard rich-text at JSON export time.
           p = root / 'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
           s = p.read_text()
+
+          # Expand requires exportedAt to be a quoted ISO-8601 timestamp.
           replacement = '''java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
                   iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
                   root.put("exportedAt", iso.format(new java.util.Date()));'''
           s = s.replace('root.put("exportedAt", System.currentTimeMillis());', replacement)
+
+          old = '            s.put("replacement", e.getValue());'
+          new = '''            String rawReplacement = e.getValue();
+                  if (isUnsupportedPerfectKeyboardAction(rawReplacement)) continue;
+                  String cleanReplacement = cleanPerfectKeyboardRichText(rawReplacement);
+                  if (cleanReplacement.isEmpty()) continue;
+                  s.put("replacement", cleanReplacement);'''
+          if old not in s:
+              raise SystemExit('replacement export line not found')
+          s = s.replace(old, new, 1)
+
+          helpers = r'''
+              private static boolean isUnsupportedPerfectKeyboardAction(String value) {
+                  if (value == null) return false;
+                  String x = value.toLowerCase(Locale.ROOT);
+                  return x.contains("<#>") || x.contains("<wx>") ||
+                          x.matches("(?s).*</?(left|right|delete|backspace|home|end|pageup|pagedown)(?:>|\\b).*?");
+              }
+
+              private static String cleanPerfectKeyboardRichText(String value) {
+                  if (value == null) return "";
+                  String x = value.replace("<ent__>", "\n");
+
+                  if (x.regionMatches(true, 0, "text#macro:", 0, "text#macro:".length())) {
+                      x = x.substring("text#macro:".length());
+                  }
+
+                  String lower = x.toLowerCase(Locale.ROOT);
+                  if (lower.contains("<html") || lower.contains("<body") || lower.contains("<div") || lower.contains("<p")) {
+                      int body = lower.indexOf("<body");
+                      if (body >= 0) {
+                          int gt = x.indexOf('>', body);
+                          if (gt >= 0) x = x.substring(gt + 1);
+                          lower = x.toLowerCase(Locale.ROOT);
+                          int end = lower.lastIndexOf("</body>");
+                          if (end >= 0) x = x.substring(0, end);
+                      }
+
+                      x = x.replaceAll("(?i)<br\\s*/?>", "\n");
+                      x = x.replaceAll("(?i)</?(p|div|li|tr|h[1-6])\\b[^>]*>", "\n");
+                      x = x.replaceAll("(?s)<[^>]+>", "");
+                      x = decodeHtmlEntities(x);
+                  }
+
+                  x = x.replace('\u00A0', ' ')
+                          .replace("\r\n", "\n")
+                          .replace('\r', '\n');
+                  x = x.replaceAll("[ \\t]+\n", "\n");
+                  x = x.replaceAll("\n[ \\t]+", "\n");
+                  x = x.replaceAll("\n{3,}", "\n\n");
+                  return x.trim();
+              }
+
+              private static String decodeHtmlEntities(String value) {
+                  String x = value.replace("&nbsp;", " ")
+                          .replace("&amp;", "&")
+                          .replace("&lt;", "<")
+                          .replace("&gt;", ">")
+                          .replace("&quot;", "\"")
+                          .replace("&#39;", "'")
+                          .replace("&apos;", "'");
+                  java.util.regex.Matcher m = java.util.regex.Pattern.compile("&#(x?[0-9A-Fa-f]+);").matcher(x);
+                  StringBuffer out = new StringBuffer();
+                  while (m.find()) {
+                      try {
+                          String n = m.group(1);
+                          int cp = (n.startsWith("x") || n.startsWith("X"))
+                                  ? Integer.parseInt(n.substring(1), 16)
+                                  : Integer.parseInt(n, 10);
+                          m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(new String(Character.toChars(cp))));
+                      } catch (Exception ex) {
+                          m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(m.group(0)));
+                      }
+                  }
+                  m.appendTail(out);
+                  return out.toString();
+              }
+          '''
+
+          marker = '    public static String readAll(InputStream in) throws IOException {'
+          if marker not in s:
+              raise SystemExit('readAll marker not found')
+          s = s.replace(marker, helpers + '\n' + marker, 1)
           p.write_text(s)
 
+          # Converter-only: remove Accessibility service from the manifest.
           p = root / 'app/src/main/AndroidManifest.xml'
           s = p.read_text()
           s = re.sub(r'\n\s*<service[\s\S]*?</service>\s*', '\n', s, count=1)
           p.write_text(s)
 
+          # Separate app ID/version from V3/V4.
           p = root / 'app/build.gradle.kts'
           s = p.read_text()
           s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverterv5"')
@@ -149,6 +145,7 @@ jobs:
           p = root / 'app/src/main/res/values/strings.xml'
           p.write_text(p.read_text().replace('PK Mobile Expander V3', 'PK Converter V5'))
 
+          # Hide the old Accessibility/text-expander controls from converter UI.
           p = root / 'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
           s = p.read_text()
           nl = chr(10)
@@ -157,40 +154,23 @@ jobs:
               'Versi kosong/universal. Pilih file .4pk milik siapa pun, aplikasi membaca shortcut milik file tersebut lalu bisa langsung dipakai atau disimpan menjadi JSON.',
               'Converter .4pk ke JSON Expand. Rich-text Perfect Keyboard otomatis dibersihkan menjadi teks normal.'
           )
-          s = s.replace(
-              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");',
-              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");' + nl + '        accessBtn.setVisibility(View.GONE);'
-          )
-          s = s.replace(
-              'enabledSwitch.setText("Aktifkan text expander");',
-              'enabledSwitch.setText("Aktifkan text expander");' + nl + '        enabledSwitch.setVisibility(View.GONE);'
-          )
-          s = s.replace(
-              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");',
-              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");' + nl + '        spaceSwitch.setVisibility(View.GONE);'
-          )
-          old_status = nl.join([
-              '        boolean service = isAccessibilityServiceEnabled();',
-              '        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");',
-              '        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));'
-          ])
-          new_status = nl.join([
-              '        statusText.setText("Mode: CONVERTER ONLY ✓");',
-              '        statusText.setTextColor(Color.rgb(25, 120, 70));'
-          ])
-          s = s.replace(old_status, new_status)
-          s = s.replace(
-              '6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.',
-              '6. Buka Expand → Settings → Import / Export → Import snippets, lalu pilih JSON tadi.'
-          )
+          s = s.replace('Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");',
+                        'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");' + nl + '        accessBtn.setVisibility(View.GONE);')
+          s = s.replace('enabledSwitch.setText("Aktifkan text expander");',
+                        'enabledSwitch.setText("Aktifkan text expander");' + nl + '        enabledSwitch.setVisibility(View.GONE);')
+          s = s.replace('spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");',
+                        'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");' + nl + '        spaceSwitch.setVisibility(View.GONE);')
+          s = s.replace('        boolean service = isAccessibilityServiceEnabled();\n        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");\n        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));',
+                        '        statusText.setText("Mode: CONVERTER ONLY ✓");\n        statusText.setTextColor(Color.rgb(25, 120, 70));')
           p.write_text(s)
           PY
 
-      - name: Sanity-check source fixes
+      - name: Sanity-check fixes
         run: |
-          ! grep -R 'root.put("exportedAt", System.currentTimeMillis())' PKMobileExpanderV3/app/src/main/java
-          grep -R 'text#macro:' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
-          grep -R 'decodeHtmlEntities' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
+          ! grep -R 'root.put("exportedAt", System.currentTimeMillis())' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          grep -q 'cleanPerfectKeyboardRichText' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          grep -q 'text#macro:' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          ! grep -q '<service' PKMobileExpanderV3/app/src/main/AndroidManifest.xml
 
       - name: Install Android SDK packages
         run: |
