@@ -1,0 +1,213 @@
+name: Build PK Converter V5 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+
+      - name: Patch converter V5
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('PKMobileExpanderV3')
+
+          # 1) Perfect Keyboard .4pk parser: convert rich HTML macros to clean plain text,
+          #    and skip non-text keyboard-action macros that Expand cannot execute.
+          p = root / 'app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java'
+          s = p.read_text()
+          s = s.replace(
+              '            String replacement = cleanupContent(lines[s + 49]);\n            if (replacement.isEmpty()) continue;',
+              '            String rawContent = safe(lines, s + 49);\n            if (isUnsupportedAutomation(rawContent)) continue;\n            String replacement = cleanupContent(rawContent);\n            if (replacement.isEmpty()) continue;'
+          )
+
+          old_cleanup = '''    private static String cleanupContent(String s) {
+              if (s == null) return "";
+              String x = s.replace("<ent__>", "\\n");
+              // Trim hanya newline/spasi di ujung; isi di tengah tidak diubah.
+              int a = 0, b = x.length();
+              while (a < b && Character.isWhitespace(x.charAt(a))) a++;
+              while (b > a && Character.isWhitespace(x.charAt(b - 1))) b--;
+              return x.substring(a, b);
+          }'''
+
+          new_cleanup = r'''    private static boolean isUnsupportedAutomation(String s) {
+              if (s == null) return false;
+              String x = s.toLowerCase(Locale.ROOT);
+              // Perfect Keyboard action sequences cannot be executed by Expand.
+              return x.contains("<#>") || x.contains("<wx>") ||
+                      x.matches("(?s).*</?(left|right|delete|backspace|home|end|pageup|pagedown)(?:>|\\b).*?");
+          }
+
+          private static String cleanupContent(String s) {
+              if (s == null) return "";
+              String x = s.replace("<ent__>", "\n");
+
+              // Perfect Keyboard rich-text records use text#macro:<HTML>...</HTML>.
+              if (x.regionMatches(true, 0, "text#macro:", 0, "text#macro:".length())) {
+                  x = x.substring("text#macro:".length());
+              }
+
+              String lower = x.toLowerCase(Locale.ROOT);
+              if (lower.contains("<html") || lower.contains("<body") || lower.contains("<div") || lower.contains("<p>")) {
+                  int body = lower.indexOf("<body");
+                  if (body >= 0) {
+                      int gt = x.indexOf('>', body);
+                      if (gt >= 0) x = x.substring(gt + 1);
+                      lower = x.toLowerCase(Locale.ROOT);
+                      int bodyEnd = lower.lastIndexOf("</body>");
+                      if (bodyEnd >= 0) x = x.substring(0, bodyEnd);
+                  }
+
+                  x = x.replaceAll("(?i)<br\\s*/?>", "\n");
+                  x = x.replaceAll("(?i)</?(p|div|li|tr|h[1-6])\\b[^>]*>", "\n");
+                  x = x.replaceAll("(?s)<[^>]+>", "");
+                  x = decodeHtmlEntities(x);
+              }
+
+              x = x.replace('\u00A0', ' ')
+                   .replace("\r\n", "\n")
+                   .replace('\r', '\n');
+              x = x.replaceAll("[ \\t]+\n", "\n");
+              x = x.replaceAll("\n[ \\t]+", "\n");
+              x = x.replaceAll("\n{3,}", "\n\n");
+
+              int a = 0, b = x.length();
+              while (a < b && Character.isWhitespace(x.charAt(a))) a++;
+              while (b > a && Character.isWhitespace(x.charAt(b - 1))) b--;
+              return x.substring(a, b);
+          }
+
+          private static String decodeHtmlEntities(String s) {
+              String x = s.replace("&nbsp;", " ")
+                      .replace("&amp;", "&")
+                      .replace("&lt;", "<")
+                      .replace("&gt;", ">")
+                      .replace("&quot;", "\\\"")
+                      .replace("&#39;", "'")
+                      .replace("&apos;", "'");
+              java.util.regex.Matcher m = java.util.regex.Pattern.compile("&#(x?[0-9A-Fa-f]+);").matcher(x);
+              StringBuffer sb = new StringBuffer();
+              while (m.find()) {
+                  try {
+                      String n = m.group(1);
+                      int cp = (n.startsWith("x") || n.startsWith("X"))
+                              ? Integer.parseInt(n.substring(1), 16)
+                              : Integer.parseInt(n, 10);
+                      m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(new String(Character.toChars(cp))));
+                  } catch (Exception ex) {
+                      m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(m.group(0)));
+                  }
+              }
+              m.appendTail(sb);
+              return sb.toString();
+          }'''
+
+          if old_cleanup not in s:
+              raise SystemExit('cleanupContent source not found')
+          s = s.replace(old_cleanup, new_cleanup)
+          p.write_text(s)
+
+          # 2) Expand export schema: exportedAt must be an ISO-8601 string.
+          p = root / 'app/src/main/java/com/antokon/pkmobile/MacroRepository.java'
+          s = p.read_text()
+          replacement = '''java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+                  iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                  root.put("exportedAt", iso.format(new java.util.Date()));'''
+          s = s.replace('root.put("exportedAt", System.currentTimeMillis());', replacement)
+          p.write_text(s)
+
+          # 3) Converter-only: no Accessibility service/permission flow.
+          p = root / 'app/src/main/AndroidManifest.xml'
+          s = p.read_text()
+          s = re.sub(r'\n\s*<service[\s\S]*?</service>\s*', '\n', s, count=1)
+          p.write_text(s)
+
+          # 4) Separate app id/version so V5 can coexist with older builds.
+          p = root / 'app/build.gradle.kts'
+          s = p.read_text()
+          s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverterv5"')
+          s = s.replace('versionCode = 3', 'versionCode = 5')
+          s = s.replace('versionName = "3.0"', 'versionName = "5.0"')
+          p.write_text(s)
+
+          p = root / 'app/src/main/res/values/strings.xml'
+          p.write_text(p.read_text().replace('PK Mobile Expander V3', 'PK Converter V5'))
+
+          p = root / 'app/src/main/java/com/antokon/pkmobile/MainActivity.java'
+          s = p.read_text()
+          nl = chr(10)
+          s = s.replace('PK Mobile Expander V3', 'PK Converter V5')
+          s = s.replace(
+              'Versi kosong/universal. Pilih file .4pk milik siapa pun, aplikasi membaca shortcut milik file tersebut lalu bisa langsung dipakai atau disimpan menjadi JSON.',
+              'Converter .4pk ke JSON Expand. Rich-text Perfect Keyboard otomatis dibersihkan menjadi teks normal.'
+          )
+          s = s.replace(
+              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");',
+              'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");' + nl + '        accessBtn.setVisibility(View.GONE);'
+          )
+          s = s.replace(
+              'enabledSwitch.setText("Aktifkan text expander");',
+              'enabledSwitch.setText("Aktifkan text expander");' + nl + '        enabledSwitch.setVisibility(View.GONE);'
+          )
+          s = s.replace(
+              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");',
+              'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");' + nl + '        spaceSwitch.setVisibility(View.GONE);'
+          )
+          old_status = nl.join([
+              '        boolean service = isAccessibilityServiceEnabled();',
+              '        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");',
+              '        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));'
+          ])
+          new_status = nl.join([
+              '        statusText.setText("Mode: CONVERTER ONLY ✓");',
+              '        statusText.setTextColor(Color.rgb(25, 120, 70));'
+          ])
+          s = s.replace(old_status, new_status)
+          s = s.replace(
+              '6. Aktifkan Aksesibilitas untuk memakai shortcut langsung di LINE/Notes/browser.',
+              '6. Buka Expand → Settings → Import / Export → Import snippets, lalu pilih JSON tadi.'
+          )
+          p.write_text(s)
+          PY
+
+      - name: Sanity-check source fixes
+        run: |
+          ! grep -R 'root.put("exportedAt", System.currentTimeMillis())' PKMobileExpanderV3/app/src/main/java
+          grep -R 'text#macro:' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
+          grep -R 'decodeHtmlEntities' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
+
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK
+        working-directory: PKMobileExpanderV3
+        run: gradle :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Converter-V5-Fixed-APK
+          path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
