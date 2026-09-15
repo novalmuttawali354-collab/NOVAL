@@ -1,0 +1,22 @@
+name: Dump PK Source
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+      - name: Dump MacroRepository
+        run: |
+          echo '===== MacroRepository.java ====='
+          cat PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          echo '===== PerfectKeyboard4pkParser.java ====='
+          cat PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
