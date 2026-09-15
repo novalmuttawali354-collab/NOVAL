@@ -1,0 +1,144 @@
+name: Build PK Converter V7B APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+
+      - name: Patch strict cleaner
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('PKMobileExpanderV3')
+          pkg = root / 'app/src/main/java/com/antokon/pkmobile'
+
+          cleaner = r'''package com.antokon.pkmobile;
+          import java.util.Locale;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+          public final class TextCleaner {
+              private TextCleaner() {}
+              public static String clean(String input) {
+                  if (input == null) return "";
+                  String x = input.replace("<ent__>", "\n").replace("\r\n", "\n").replace('\r','\n');
+                  x = x.replace("\uFEFF", "").trim();
+                  x = x.replaceFirst("(?is)^\\s*text#macro\\s*:\\s*", "");
+                  String low = x.toLowerCase(Locale.ROOT);
+                  if (low.contains("<html") || low.contains("<body") || low.contains("<head") || low.contains("<meta")) {
+                      Matcher body = Pattern.compile("(?is)<body\\b[^>]*>(.*?)</body\\s*>").matcher(x);
+                      if (body.find()) x = body.group(1);
+                      else x = x.replaceAll("(?is)<head\\b[^>]*>.*?</head\\s*>", "");
+                      x = x.replaceAll("(?i)<br\\s*/?>", "\n");
+                      x = x.replaceAll("(?i)</?(p|div|li|tr|h[1-6])\\b[^>]*>", "\n");
+                      x = x.replaceAll("(?is)<[^>]+>", "");
+                  }
+                  x = x.replace("&nbsp;", " ").replace("&#160;", " ").replace("&amp;", "&")
+                       .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+                       .replace("&#39;", "'").replace("&apos;", "'");
+                  x = x.replace('\u00A0', ' ').replaceAll("\\n{3,}", "\n\n").trim();
+                  return x;
+              }
+              public static boolean dirty(String input) {
+                  if (input == null) return false;
+                  String s = input.toLowerCase(Locale.ROOT);
+                  return s.contains("text#macro:") || s.contains("<html") || s.contains("<head") || s.contains("<body") || s.contains("<meta");
+              }
+          }
+          '''
+          cleaner = '\n'.join(line.strip() if line.startswith('          ') else line for line in cleaner.splitlines()) + '\n'
+          (pkg / 'TextCleaner.java').write_text(cleaner)
+
+          p = pkg / 'PerfectKeyboard4pkParser.java'
+          s = p.read_text()
+          s = s.replace('String replacement = cleanupContent(lines[s + 49]);', 'String replacement = TextCleaner.clean(cleanupContent(lines[s + 49]));')
+          p.write_text(s)
+
+          p = pkg / 'MacroRepository.java'
+          s = p.read_text()
+          s = s.replace('String replacement = o.optString("replacement", "");', 'String replacement = TextCleaner.clean(o.optString("replacement", ""));')
+          s = s.replace('o.put("replacement", e.getValue());', 'o.put("replacement", TextCleaner.clean(e.getValue()));')
+          s = s.replace('String replacement = s.optString("replacement", "");', 'String replacement = TextCleaner.clean(s.optString("replacement", ""));')
+          s = s.replace('String replacement = trimBlankLines(content.toString());', 'String replacement = TextCleaner.clean(trimBlankLines(content.toString()));')
+          s = s.replace('s.put("replacement", e.getValue());', 'String clean = TextCleaner.clean(e.getValue());\n            if (TextCleaner.dirty(clean)) throw new IllegalStateException("Format HTML masih terdeteksi pada trigger " + e.getKey());\n            s.put("replacement", clean);')
+          s = s.replace(
+              'root.put("exportedAt", System.currentTimeMillis());',
+              '''java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);\n        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));\n        root.put("exportedAt", iso.format(new java.util.Date()));'''
+          )
+          p.write_text(s)
+
+          p = root / 'app/src/main/AndroidManifest.xml'
+          s = re.sub(r'\n\s*<service[\s\S]*?</service>\s*', '\n', p.read_text(), count=1)
+          p.write_text(s)
+
+          p = root / 'app/build.gradle.kts'
+          s = p.read_text().replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverterv7b"')
+          s = s.replace('versionCode = 3', 'versionCode = 71').replace('versionName = "3.0"', 'versionName = "7.1"')
+          p.write_text(s)
+
+          p = pkg / 'MainActivity.java'
+          s = p.read_text().replace('PK Mobile Expander V3', 'PK Converter V7B')
+          s = s.replace('MacroRepository.mergeAndSave(', 'MacroRepository.save(')
+          s = s.replace('Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");', 'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");\n        accessBtn.setVisibility(View.GONE);')
+          s = s.replace('enabledSwitch.setText("Aktifkan text expander");', 'enabledSwitch.setText("Aktifkan text expander");\n        enabledSwitch.setVisibility(View.GONE);')
+          s = s.replace('spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");', 'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");\n        spaceSwitch.setVisibility(View.GONE);')
+          p.write_text(s)
+
+          p = root / 'app/src/main/res/values/strings.xml'
+          p.write_text(p.read_text().replace('PK Mobile Expander V3', 'PK Converter V7B'))
+          PY
+
+      - name: Test exact bad HTML pattern
+        run: |
+          cat >/tmp/TestCleaner.java <<'JAVA'
+          import com.antokon.pkmobile.TextCleaner;
+          public class TestCleaner {
+            public static void main(String[] args) {
+              String raw = "text#macro:<HTML><HEAD><META content=\"text/html; charset=unicode\" http-equiv=Content-Type><META name=GENERATOR content=\"MSHTML 11.00.10570.1001\"></HEAD><BODY>mohon maaf ya bosku akun anda di lock otomatis oleh system&nbsp;dikarenakan nomor rekening anda tidak valid ya bosku</BODY></HTML>";
+              String clean = TextCleaner.clean(raw);
+              if (TextCleaner.dirty(clean)) throw new RuntimeException(clean);
+              if (!clean.equals("mohon maaf ya bosku akun anda di lock otomatis oleh system dikarenakan nomor rekening anda tidak valid ya bosku")) throw new RuntimeException(clean);
+              System.out.println("CLEAN_OK: " + clean);
+            }
+          }
+          JAVA
+          mkdir -p /tmp/testclasses
+          javac -d /tmp/testclasses PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/TextCleaner.java /tmp/TestCleaner.java
+          java -cp /tmp/testclasses TestCleaner
+
+      - name: Install Android SDK packages
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK
+        working-directory: PKMobileExpanderV3
+        run: gradle :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Converter-V7B-Strict-Clean-APK
+          path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
