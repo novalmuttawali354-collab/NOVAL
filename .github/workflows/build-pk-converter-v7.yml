@@ -1,0 +1,222 @@
+name: Build PK Converter V7 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+
+      - name: Patch converter V7
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('PKMobileExpanderV3')
+          pkg = root / 'app/src/main/java/com/antokon/pkmobile'
+
+          # Pure-Java sanitizer shared by parser + repository + exporter.
+          (pkg / 'TextSanitizer.java').write_text(r'''package com.antokon.pkmobile;
+
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class TextSanitizer {
+    private TextSanitizer() {}
+
+    public static String clean(String input) {
+        if (input == null) return "";
+        String x = input
+                .replace("<ent__>", "\n")
+                .replace("\r\n", "\n")
+                .replace('\r', '\n');
+
+        // Remove Perfect Keyboard wrapper even if whitespace/BOM exists before it.
+        x = x.replace("\uFEFF", "").trim();
+        x = x.replaceFirst("(?is)^\\s*text#macro\\s*:\\s*", "");
+
+        String lower = x.toLowerCase(Locale.ROOT);
+        if (lower.contains("<html") || lower.contains("<body") ||
+                lower.contains("<head") || lower.contains("<meta") ||
+                lower.contains("<div") || lower.contains("<p")) {
+
+            // Prefer BODY contents if present, so HEAD/META never leaks.
+            Matcher body = Pattern.compile("(?is)<body\\b[^>]*>(.*?)</body\\s*>").matcher(x);
+            if (body.find()) x = body.group(1);
+            else x = x.replaceAll("(?is)<head\\b[^>]*>.*?</head\\s*>", "");
+
+            x = x.replaceAll("(?is)<script\\b[^>]*>.*?</script\\s*>", "");
+            x = x.replaceAll("(?is)<style\\b[^>]*>.*?</style\\s*>", "");
+            x = x.replaceAll("(?i)<br\\s*/?>", "\n");
+            x = x.replaceAll("(?i)</?(p|div|li|tr|h[1-6])\\b[^>]*>", "\n");
+            x = x.replaceAll("(?is)<[^>]+>", "");
+        }
+
+        x = decodeEntities(x).replace('\u00A0', ' ');
+        x = x.replaceAll("[ \\t]+\\n", "\n");
+        x = x.replaceAll("\\n[ \\t]+", "\n");
+        x = x.replaceAll("\\n{3,}", "\n\n");
+        x = x.trim();
+        return x;
+    }
+
+    public static boolean looksDirty(String value) {
+        if (value == null) return false;
+        String s = value.toLowerCase(Locale.ROOT);
+        return s.contains("text#macro:") || s.contains("<html") ||
+                s.contains("<head") || s.contains("<body") || s.contains("<meta");
+    }
+
+    private static String decodeEntities(String value) {
+        String x = value
+                .replace("&nbsp;", " ")
+                .replace("&#160;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'");
+        Matcher m = Pattern.compile("&#(x?[0-9A-Fa-f]+);").matcher(x);
+        StringBuffer out = new StringBuffer();
+        while (m.find()) {
+            try {
+                String n = m.group(1);
+                int cp = (n.startsWith("x") || n.startsWith("X"))
+                        ? Integer.parseInt(n.substring(1), 16)
+                        : Integer.parseInt(n, 10);
+                m.appendReplacement(out, Matcher.quoteReplacement(new String(Character.toChars(cp))));
+            } catch (Exception ex) {
+                m.appendReplacement(out, Matcher.quoteReplacement(m.group(0)));
+            }
+        }
+        m.appendTail(out);
+        return out.toString();
+    }
+}
+''')
+
+          # Parser: clean each macro content before inserting.
+          p = pkg / 'PerfectKeyboard4pkParser.java'
+          s = p.read_text()
+          s = re.sub(
+              r'private static String cleanupContent\(String s\) \{[\s\S]*?\n    \}',
+              'private static String cleanupContent(String s) {\n        return TextSanitizer.clean(s);\n    }',
+              s, count=1
+          )
+          p.write_text(s)
+
+          # Repository: sanitize on load, save, Expand import, preview import, and FINAL EXPORT.
+          p = pkg / 'MacroRepository.java'
+          s = p.read_text()
+          s = s.replace('String replacement = o.optString("replacement", "");',
+                        'String replacement = TextSanitizer.clean(o.optString("replacement", ""));')
+          s = s.replace('o.put("replacement", e.getValue());',
+                        'o.put("replacement", TextSanitizer.clean(e.getValue()));')
+          s = s.replace('String replacement = s.optString("replacement", "");',
+                        'String replacement = TextSanitizer.clean(s.optString("replacement", ""));')
+          s = s.replace('String replacement = trimBlankLines(content.toString());',
+                        'String replacement = TextSanitizer.clean(trimBlankLines(content.toString()));')
+          s = s.replace('s.put("replacement", e.getValue());',
+                        'String clean = TextSanitizer.clean(e.getValue());\n            if (TextSanitizer.looksDirty(clean)) throw new IllegalStateException("Masih ada format HTML pada trigger: " + e.getKey());\n            s.put("replacement", clean);')
+          s = s.replace(
+              'root.put("exportedAt", System.currentTimeMillis());',
+              'java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd\'T\'HH:mm:ss.SSS\'Z\'", java.util.Locale.US);\n        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));\n        root.put("exportedAt", iso.format(new java.util.Date()));'
+          )
+          p.write_text(s)
+
+          # Converter-only: remove Accessibility service.
+          p = root / 'app/src/main/AndroidManifest.xml'
+          s = p.read_text()
+          s = re.sub(r'\n\s*<service[\s\S]*?</service>\s*', '\n', s, count=1)
+          p.write_text(s)
+
+          # Fresh package so no old dirty database can carry over from V3-V6.
+          p = root / 'app/build.gradle.kts'
+          s = p.read_text()
+          s = s.replace('applicationId = "com.antokon.pkmobile"', 'applicationId = "com.antokon.pkconverterv7"')
+          s = s.replace('versionCode = 3', 'versionCode = 7')
+          s = s.replace('versionName = "3.0"', 'versionName = "7.0"')
+          p.write_text(s)
+
+          # UI: converter only and replace current imported set instead of merging duplicates.
+          p = pkg / 'MainActivity.java'
+          s = p.read_text()
+          s = s.replace('PK Mobile Expander V3', 'PK Converter V7')
+          s = s.replace('MacroRepository.mergeAndSave(', 'MacroRepository.save(')
+          s = s.replace('Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");',
+                        'Button accessBtn = button("BUKA PENGATURAN AKSESIBILITAS");\n        accessBtn.setVisibility(View.GONE);')
+          s = s.replace('enabledSwitch.setText("Aktifkan text expander");',
+                        'enabledSwitch.setText("Aktifkan text expander");\n        enabledSwitch.setVisibility(View.GONE);')
+          s = s.replace('spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");',
+                        'spaceSwitch.setText("Jalankan shortcut saat tekan spasi / Enter");\n        spaceSwitch.setVisibility(View.GONE);')
+          s = s.replace('        boolean service = isAccessibilityServiceEnabled();\n        statusText.setText(service ? "Layanan: AKTIF ✓" : "Layanan: BELUM AKTIF");\n        statusText.setTextColor(service ? Color.rgb(25, 120, 70) : Color.rgb(180, 55, 55));',
+                        '        statusText.setText("Mode: CONVERTER ONLY • FILTER HTML AKTIF ✓");\n        statusText.setTextColor(Color.rgb(25, 120, 70));')
+          p.write_text(s)
+
+          p = root / 'app/src/main/res/values/strings.xml'
+          p.write_text(p.read_text().replace('PK Mobile Expander V3', 'PK Converter V7'))
+          PY
+
+      - name: Test sanitizer with real failing pattern
+        run: |
+          cat > /tmp/TestSanitizer.java <<'JAVA'
+          import com.antokon.pkmobile.TextSanitizer;
+          public class TestSanitizer {
+            public static void main(String[] args) {
+              String raw = "text#macro:<HTML><HEAD><META content=\"text/html; charset=unicode\" http-equiv=Content-Type><META name=GENERATOR content=\"MSHTML 11.00.10570.1001\"></HEAD><BODY>mohon maaf ya bosku akun anda di lock otomatis oleh system&nbsp;dikarenakan nomor rekening anda tidak valid ya bosku</BODY></HTML>";
+              String clean = TextSanitizer.clean(raw);
+              if (TextSanitizer.looksDirty(clean)) throw new RuntimeException("dirty: " + clean);
+              if (!clean.contains("mohon maaf ya bosku")) throw new RuntimeException("text lost: " + clean);
+              System.out.println("SANITIZER_OK=" + clean);
+            }
+          }
+          JAVA
+          mkdir -p /tmp/testclasses
+          javac -d /tmp/testclasses PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/TextSanitizer.java /tmp/TestSanitizer.java
+          java -cp /tmp/testclasses TestSanitizer
+
+      - name: Static safety checks
+        run: |
+          grep -q 'TextSanitizer.clean' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          grep -q 'looksDirty' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          ! grep -q 'root.put("exportedAt", System.currentTimeMillis())' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java
+          ! grep -q '<service' PKMobileExpanderV3/app/src/main/AndroidManifest.xml
+          grep -q 'com.antokon.pkconverterv7' PKMobileExpanderV3/app/build.gradle.kts
+
+      - name: Install Android SDK packages
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK
+        working-directory: PKMobileExpanderV3
+        run: gradle :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Converter-V7-Strict-Clean-APK
+          path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
