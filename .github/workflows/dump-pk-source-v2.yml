@@ -1,0 +1,29 @@
+name: Dump PK Source V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -q project.zip
+      - name: Collect source
+        run: |
+          mkdir -p dump
+          cp PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java dump/
+          cp PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MacroRepository.java dump/
+          cp PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/MainActivity.java dump/
+          cp PKMobileExpanderV3/app/src/main/AndroidManifest.xml dump/
+          cp PKMobileExpanderV3/app/build.gradle.kts dump/
+      - name: Upload source dump
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Source-Dump-V2
+          path: dump/
