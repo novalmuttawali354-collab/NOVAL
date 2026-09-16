@@ -40,6 +40,9 @@ jobs:
           test -f /tmp/snaplink-src/SnapLinkProMax/settings.gradle.kts
           test -f /tmp/snaplink-src/SnapLinkProMax/app/src/main/AndroidManifest.xml
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Install Android SDK 36
         shell: bash
         run: |
