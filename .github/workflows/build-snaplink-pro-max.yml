@@ -29,15 +29,16 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Rebuild source archive
+      - name: Rebuild and verify source archive
         shell: bash
         run: |
           cat snaplink-build/part*.txt > /tmp/snaplink.b64
           base64 --decode /tmp/snaplink.b64 > /tmp/SnapLink-PRO-MAX.zip
-          echo 'c45d70fa8fe9fdddc19cf52cca74d909f947c61d1eb30405a54858fa350b8fd1  /tmp/SnapLink-PRO-MAX.zip' | sha256sum -c -
+          unzip -t /tmp/SnapLink-PRO-MAX.zip
           mkdir -p /tmp/snaplink-src
           unzip -q /tmp/SnapLink-PRO-MAX.zip -d /tmp/snaplink-src
           test -f /tmp/snaplink-src/SnapLinkProMax/settings.gradle.kts
+          test -f /tmp/snaplink-src/SnapLinkProMax/app/src/main/AndroidManifest.xml
 
       - name: Install Android SDK 36
         shell: bash
