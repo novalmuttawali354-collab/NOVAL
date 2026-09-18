@@ -22,8 +22,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
@@ -67,17 +65,24 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          SDKM="/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKM"
+          yes | "$SDKM" --licenses >/dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Build APK
         working-directory: PKMobileExpanderV3
         run: gradle :app:assembleDebug
 
-      - name: Verify APK exists
+      - name: Verify APK security and output
         run: |
-          test -f PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
-          ls -lh PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
+          APK="PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          ls -lh "$APK"
+          AAPT="/usr/local/lib/android/sdk/build-tools/35.0.0/aapt"
+          "$AAPT" dump permissions "$APK" | tee /tmp/perms.txt
+          ! grep -q 'android.permission.INTERNET' /tmp/perms.txt
+          ! grep -q 'android.permission.BIND_ACCESSIBILITY_SERVICE' /tmp/perms.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
