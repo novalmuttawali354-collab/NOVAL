@@ -1,0 +1,84 @@
+name: Build PK Keyboard V1 Offline APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'kbdpatch/**'
+      - '.github/workflows/build-pk-keyboard-v1.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Rebuild base project
+        run: |
+          cat chunks/00.txt chunks/01.txt chunks/02.txt chunks/03.txt chunks/04.txt chunks/05.txt | base64 -d > project.zip
+          unzip -t project.zip
+          unzip -q project.zip
+
+      - name: Apply keyboard offline patch
+        run: |
+          cat kbdpatch/00.txt kbdpatch/01.txt kbdpatch/02.txt kbdpatch/03.txt | base64 -d > keyboard-patch.zip
+          unzip -t keyboard-patch.zip
+          unzip -qo keyboard-patch.zip
+          rm -f PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/ExpanderService.java
+          rm -f PKMobileExpanderV3/app/src/main/res/xml/accessibility_service_config.xml
+
+      - name: Security and cleaner checks
+        run: |
+          ! grep -R 'android.permission.INTERNET' PKMobileExpanderV3/app/src/main
+          ! grep -R 'BIND_ACCESSIBILITY_SERVICE' PKMobileExpanderV3/app/src/main
+          grep -q 'BIND_INPUT_METHOD' PKMobileExpanderV3/app/src/main/AndroidManifest.xml
+          grep -q 'KeyboardService' PKMobileExpanderV3/app/src/main/AndroidManifest.xml
+          grep -q 'TextCleaner.clean' PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/PerfectKeyboard4pkParser.java
+          cat >/tmp/TestCleaner.java <<'JAVA'
+          import com.antokon.pkmobile.TextCleaner;
+          public class TestCleaner {
+            public static void main(String[] args) {
+              String raw = "text#macro:<HTML><HEAD><META content=\"text/html; charset=unicode\" http-equiv=Content-Type><META name=GENERATOR content=\"MSHTML 11.00.10570.1001\"></HEAD><BODY>Mohon maaf setelah kami cekkan akun ewallet anda sudah melebihi batas limit bulanan ya bosku <BR>mohon anda berikan nomor rekening bank anda agar bisa kami bantu proseskan Wihtdraw anda ya bosku </BODY></HTML>";
+              String clean = TextCleaner.clean(raw);
+              if (TextCleaner.dirty(clean)) throw new RuntimeException("HTML masih tersisa: " + clean);
+              if (clean.contains("text#macro") || clean.contains("<HTML") || clean.contains("<META") || clean.contains("<BR")) throw new RuntimeException("Cleaner gagal: " + clean);
+              System.out.println("CLEAN_OK=" + clean.replace("\n"," | "));
+            }
+          }
+          JAVA
+          mkdir -p /tmp/testclasses
+          javac -d /tmp/testclasses PKMobileExpanderV3/app/src/main/java/com/antokon/pkmobile/TextCleaner.java /tmp/TestCleaner.java
+          java -cp /tmp/testclasses TestCleaner
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build APK
+        working-directory: PKMobileExpanderV3
+        run: gradle :app:assembleDebug
+
+      - name: Verify APK exists
+        run: |
+          test -f PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PK-Keyboard-V1-OFFLINE-APK
+          path: PKMobileExpanderV3/app/build/outputs/apk/debug/app-debug.apk
